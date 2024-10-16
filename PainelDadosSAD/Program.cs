@@ -1,70 +1,50 @@
-﻿using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Data;
-using System.Data.SqlClient; // Ou Microsoft.Data.Sqlite para SQLite
-using System.Linq;
-using System.Net.Http;
-using System.Threading;
-using System.Threading.Tasks;
-using Dapper;
+﻿using System.Data;
+using System;
 using Newtonsoft.Json.Linq;
+using Microsoft.Data.SqlClient;
+using Dapper;
 
-namespace CamaraDataFetcher
+class Program
 {
-    class Program
+    static string connectionString = "Data Source=10.1.1.3;Initial Catalog=teste;User ID=sa;Password=@npd.2020;TrustServerCertificate=True";
+
+    static async Task Main(string[] args)
     {
-        static string connectionString = "Data Source=10.1.1.3;Initial Catalog=teste;User ID=sa;Password=@npd.2020;TrustServerCertificate=True";
-        static SemaphoreSlim semaphore = new SemaphoreSlim(5); // Limite de 5 requisições simultâneas
-
-        static async Task Main(string[] args)
+        while (true)
         {
-            await ProcessEndpointsAsync();
-        }
-
-        static async Task ProcessEndpointsAsync()
-        {
-            var endpoints = new Dictionary<string, string>
+            Console.WriteLine("Digite a URL do endpoint da API ou 'sair' para encerrar:");
+            string url = Console.ReadLine();
+            if (url.ToLower() == "sair")
             {
-                { "deputados", "https://dadosabertos.camara.leg.br/api/v2/deputados?dataInicio=2022-01-01&ordem=ASC&ordenarPor=nome" },
-                { "proposicoes", "https://dadosabertos.camara.leg.br/api/v2/proposicoes?dataInicio=2022-01-01&dataFim=2024-10-16&ordem=ASC&ordenarPor=id" },
-                { "orgaos", "https://dadosabertos.camara.leg.br/api/v2/orgaos" },
-                { "votacoes", "https://dadosabertos.camara.leg.br/api/v2/votacoes?dataInicio=2022-01-01&ordem=DESC&ordenarPor=dataHoraRegistro" },
-                { "partidos", "https://dadosabertos.camara.leg.br/api/v2/partidos" },
-                { "legislaturas", "https://dadosabertos.camara.leg.br/api/v2/legislaturas" }
-            };
-
-            int totalEndpoints = endpoints.Count;
-            int processedEndpoints = 0;
-
-            using (IDbConnection connection = new SqlConnection(connectionString))
-            {
-                foreach (var kvp in endpoints)
-                {
-                    string deleteData = $"IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{kvp.Key}') BEGIN DELETE FROM {kvp.Key}; END;";
-                }
-
-                var tasks = endpoints.Select(async kvp =>
-                {
-                    await ProcessEndpointAsync(kvp.Key, kvp.Value, connection);
-                    int completed = Interlocked.Increment(ref processedEndpoints);
-                    Console.WriteLine($"Progresso total: {(completed * 100) / totalEndpoints}%");
-                }).ToList();
-
-                await Task.WhenAll(tasks);
+                break;
             }
+
+            Console.WriteLine("Digite o nome da tabela onde os dados serão armazenados:");
+            string tableName = Console.ReadLine();
+
+            Console.WriteLine("Deseja excluir os dados da tabela antes de importar? (s/n):");
+            string truncateResponse = Console.ReadLine();
+            bool truncateBeforeInsert = truncateResponse.ToLower() == "s";
+
+            // Executa o processo de busca e armazenamento dos dados
+            await ProcessEndpointAsync(url, tableName, truncateBeforeInsert);
         }
 
-        static async Task ProcessEndpointAsync(string tableName, string endpointUrl, IDbConnection connection)
+        Console.WriteLine("Aplicação encerrada.");
+    }
+
+    static async Task ProcessEndpointAsync(string url, string tableName, bool truncateBeforeInsert)
+    {
+        using (IDbConnection connection = new SqlConnection(connectionString))
         {
             Console.WriteLine($"Processando {tableName}...");
 
-            var allData = await FetchAllPagesAsync(endpointUrl, tableName);
+            var allData = await FetchAllPagesAsync(url);
 
             if (allData.Count > 0)
             {
                 JArray dataArray = new JArray(allData);
-                await StoreDataAsync(tableName, dataArray, connection);
+                StoreData(tableName, dataArray, connection, truncateBeforeInsert);
                 Console.WriteLine($"{tableName} armazenado com sucesso!");
             }
             else
@@ -72,108 +52,87 @@ namespace CamaraDataFetcher
                 Console.WriteLine($"Nenhum dado encontrado para {tableName}.");
             }
         }
+    }
 
-        static async Task<JObject> FetchDataAsync(string endpointUrl)
+    static async Task<JObject> FetchDataAsync(string endpointUrl)
+    {
+        using (HttpClient client = new HttpClient())
         {
-            await semaphore.WaitAsync();
+            HttpResponseMessage response = await client.GetAsync(endpointUrl);
+            response.EnsureSuccessStatusCode();
+            string content = await response.Content.ReadAsStringAsync();
+            return JObject.Parse(content);
+        }
+    }
+
+    static async Task<List<JObject>> FetchAllPagesAsync(string endpointUrl)
+    {
+        List<JObject> allData = new List<JObject>();
+        string url = endpointUrl;
+
+        while (!string.IsNullOrEmpty(url))
+        {
             try
             {
-                using (HttpClient client = new HttpClient())
+                JObject data = await FetchDataAsync(url);
+
+                if (data["dados"] != null)
                 {
-                    HttpResponseMessage response = await client.GetAsync(endpointUrl);
-                    response.EnsureSuccessStatusCode();
-                    string content = await response.Content.ReadAsStringAsync();
-                    return JObject.Parse(content);
+                    allData.AddRange(data["dados"].ToObject<List<JObject>>());
                 }
+
+                // Encontra o link para a próxima página
+                string nextUrl = data["links"]?
+                    .FirstOrDefault(l => l["rel"]?.ToString() == "next")?["href"]?.ToString();
+
+                url = nextUrl;
             }
-            finally
+            catch (Exception ex)
             {
-                semaphore.Release();
+                Console.WriteLine($"Erro ao processar {url}: {ex.Message}");
+                break;
             }
         }
+        return allData;
+    }
 
-        static async Task<List<JObject>> FetchAllPagesAsync(string endpointUrl, string tableName)
+    static void StoreData(string tableName, JArray data, IDbConnection connection, bool truncateBeforeInsert)
+    {
+        if (data.Count == 0) return;
+
+        // Obter as colunas do primeiro objeto
+        var columns = ((JObject)data[0]).Properties().Select(p => p.Name).ToList();
+
+        // Verificar se a tabela já existe
+        string checkTableExistsSql = $@"
+            IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{tableName}')
+            BEGIN
+                CREATE TABLE [{tableName}] (";
+        foreach (var column in columns)
         {
-            List<JObject> allData = new List<JObject>();
-            string url = endpointUrl;
-            int pageCount = 0;
+            checkTableExistsSql += $"[{column}] NVARCHAR(MAX),";
+        }
+        checkTableExistsSql = checkTableExistsSql.TrimEnd(',') + "); END;";
 
-            while (!string.IsNullOrEmpty(url))
-            {
-                pageCount++;
-                try
-                {
-                    JObject data = await FetchDataAsync(url);
+        // Executa a criação da tabela se necessário
+        connection.Execute(checkTableExistsSql);
 
-                    if (data["dados"] != null)
-                    {
-                        allData.AddRange(data["dados"].ToObject<List<JObject>>());
-                    }
-
-                    // Exibe o progresso dentro do endpoint
-                    Console.WriteLine($"[{tableName}] Páginas processadas: {pageCount}");
-
-                    // Encontra o link para a próxima página
-                    string nextUrl = data["links"]?
-                        .FirstOrDefault(l => l["rel"]?.ToString() == "next")?["href"]?.ToString();
-
-                    url = nextUrl;
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Erro ao processar {url}: {ex.Message}");
-                    break;
-                }
-            }
-
-            return allData;
+        // Excluir dados da tabela, se necessário
+        if (truncateBeforeInsert)
+        {
+            string truncateSql = $"TRUNCATE TABLE [{tableName}];";
+            connection.Execute(truncateSql);
         }
 
-        static async Task StoreDataAsync(string tableName, JArray data, IDbConnection connection)
+        // Inserir dados
+        foreach (var item in data)
         {
-            if (data.Count == 0) return;
+            var itemObj = (JObject)item;
+            var itemColumns = itemObj.Properties().Select(p => p.Name).ToList();
+            var itemValues = itemObj.Properties().Select(p => p.Value.ToString().Replace("'", "''")).ToList();
 
-            // Obter as colunas do primeiro objeto
-            var columns = ((JObject)data[0]).Properties().Select(p => p.Name).ToList();
-
-            // Criar tabela dinamicamente
-            string createTableSql = GenerateCreateTableSql(tableName, columns);
-            await connection.ExecuteAsync(createTableSql);
-
-            // Preparar dados para inserção em lote
-            var dataTable = new DataTable();
-            foreach (var column in columns)
-            {
-                dataTable.Columns.Add(column, typeof(string));
-            }
-
-            foreach (var item in data)
-            {
-                var row = dataTable.NewRow();
-                foreach (var column in columns)
-                {
-                    row[column] = item[column]?.ToString();
-                }
-                dataTable.Rows.Add(row);
-            }
-
-            // Inserção em lote usando SqlBulkCopy
-            using (var bulkCopy = new SqlBulkCopy((SqlConnection)connection))
-            {
-                bulkCopy.DestinationTableName = tableName;
-                await bulkCopy.WriteToServerAsync(dataTable);
-            }
-        }
-
-        static string GenerateCreateTableSql(string tableName, List<string> columns)
-        {
-            string createTableSql = $"IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{tableName}') BEGIN CREATE TABLE [{tableName}] (";
-            foreach (var column in columns)
-            {
-                createTableSql += $"[{column}] NVARCHAR(MAX),";
-            }
-            createTableSql = createTableSql.TrimEnd(',') + "); END;";
-            return createTableSql;
+            string insertSql = $"INSERT INTO [{tableName}] ({string.Join(",", itemColumns.Select(c => $"[{c}]"))}) VALUES ({string.Join(",", itemValues.Select(v => $"'{v}'"))});";
+            connection.Execute(insertSql);
         }
     }
 }
