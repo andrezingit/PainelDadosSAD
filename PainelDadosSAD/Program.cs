@@ -5,6 +5,7 @@ using Microsoft.Data.SqlClient;
 using Dapper;
 using System.Xml;
 using Newtonsoft.Json;
+using System.IO.Pipes;
 
 class Program
 {
@@ -12,6 +13,10 @@ class Program
     static string idProposicao = string.Empty;
     static string _url = string.Empty;
     static int contador = 0;
+    static int ano = 1999;
+    static int opcaoSel = 0;
+    static string idDeputado = string.Empty; 
+    static string idLegislatura = string.Empty;
     static async Task Main(string[] args)
     {
         while (true)
@@ -19,14 +24,15 @@ class Program
             contador = 0;
             Dictionary<string, string> endpoints = new Dictionary<string, string>
             {
-                { "deputados", "https://dadosabertos.camara.leg.br/api/v2/deputados?dataInicio=2018-01-01&ordem=ASC&ordenarPor=nome" },
-                { "proposicoes", "https://dadosabertos.camara.leg.br/api/v2/proposicoes?dataInicio=2018-01-01&dataFim=2024-10-16&ordem=ASC&ordenarPor=id" },
+                { "deputados", $"https://dadosabertos.camara.leg.br/api/v2/deputados?dataInicio={ano}-02-01&ordem=ASC&ordenarPor=nome&itens=1000" },
+                { "proposicoes", $"https://dadosabertos.camara.leg.br/api/v2/proposicoes?dataInicio={ano}-01-01&dataFim={(ano != 2024 ? ano + "-12-31" : DateTime.Today.Date)}&ordem=ASC&ordenarPor=id&itens=100" },
                 { "orgaos", "https://dadosabertos.camara.leg.br/api/v2/orgaos" },
-                { "votacoes", "https://dadosabertos.camara.leg.br/api/v2/votacoes?dataInicio=2019-01-01&ordem=DESC&ordenarPor=dataHoraRegistro" },
+                { "votacoes", $"https://dadosabertos.camara.leg.br/api/v2/votacoes?dataInicio={ano}-01-01&dataFim={(ano != 2024 ? ano + "-12-31" : DateTime.Today.Date)}&ordem=ASC&ordenarPor=id&itens=100" },
                 { "partidos", "https://dadosabertos.camara.leg.br/api/v2/partidos" },
                 { "legislaturas", "https://dadosabertos.camara.leg.br/api/v2/legislaturas" },
                 { "situacao", "https://dadosabertos.camara.leg.br/api/v2/referencias/situacoesProposicao" },
-                { "siglaTipo", "https://dadosabertos.camara.leg.br/api/v2/referencias/proposicoes/siglaTipo" }
+                { "siglaTipo", "https://dadosabertos.camara.leg.br/api/v2/referencias/proposicoes/siglaTipo" },
+                {"tiposDespesa", "https://dadosabertos.camara.leg.br/api/v2/referencias/deputados/tipoDespesa" }
             };
 
             Dictionary<int, string> opcoes = new Dictionary<int, string> 
@@ -40,7 +46,8 @@ class Program
                 {7, "situacao"},
                 {8, "siglaTipo"},
                 {9, "au_prop"},
-                {10, "sit_prop"}
+                {10, "sit_prop"},
+                {11, "desp_dep"}
             };
             Console.WriteLine("\nDigite a opção ou URL do endpoint da API para buscar autores das proposições ou 'sair' para encerrar:");
             foreach (var opcao in opcoes)
@@ -61,6 +68,7 @@ class Program
             {
                 url = opcoes[opcaoInt];
                 tableName = url;
+                opcaoSel = opcaoInt;
             }
             else
             {
@@ -82,15 +90,40 @@ class Program
                 CarregaProposicoes();
                 continue;
             }
+            else if(url.ToLower() == "desp_dep")
+            {
+                _url = url;
+                Console.WriteLine("Digite a legislatura");
+                idLegislatura = Console.ReadLine();
+                Console.WriteLine("Processando situação das proposições...");
+                CarregaDeputados();
+                continue;
+            }
             else
             {
-                url = endpoints[url];
+                if (endpoints.ContainsKey(url))
+                {
+                    url = endpoints[url];
+                }
                 Console.WriteLine("Deseja excluir os dados da tabela antes de importar? (s/n):");
                 string truncateResponse = Console.ReadLine();
                 bool truncateBeforeInsert = truncateResponse.ToLower() == "s";
 
                 // Executa o processo de busca e armazenamento dos dados
-                await ProcessEndpointAsync(url, tableName, truncateBeforeInsert);
+                if (opcaoSel == 2 || opcaoSel == 4)
+                    while(ano <= 2024)
+                    {
+                        url = url.Replace((ano-1).ToString(), ano.ToString());
+                        ano++;
+                        if(ano > 2019)
+                            truncateBeforeInsert = false;
+
+                        await ProcessEndpointAsync(url, tableName, truncateBeforeInsert);
+                    }   
+                else
+                    await ProcessEndpointAsync(url, tableName, truncateBeforeInsert);
+
+                ano = 2019;
             }
         }
 
@@ -104,7 +137,6 @@ class Program
             //Console.WriteLine("Processando autores das proposições...");
 
             var proposicoes = connection.Query("SELECT * FROM Proposicoes").ToList();
-            proposicoes[1].Id = "2193304";
             foreach (var proposicao in proposicoes)
             {
                 idProposicao = proposicao.id;
@@ -130,14 +162,35 @@ class Program
         }
     }
 
+    static async Task CarregaDeputados()
+    {
+        using (IDbConnection connection = new SqlConnection(connectionString))
+        {
+            Console.WriteLine("Processando despesas dos deputados...");
+            var deputados = connection.Query($"SELECT id, idLegislatura FROM Deputados WHERE idLegislatura = {idLegislatura} GROUP BY id, idLegislatura").ToList();
+            string tableName = "DeputadosDespesas";
+            foreach (var deputado in deputados)
+            {
+                idDeputado = deputado.id;
+                if (deputado.idLegislatura != null)
+                {
+                    deputado.idLegislatura = idLegislatura;
+                    string url = $"https://dadosabertos.camara.leg.br/api/v2/deputados/{idDeputado}/despesas?idLegislatura={idLegislatura}&itens=100&ordem=ASC&ordenarPor=ano";
+                    await ProcessEndpointAsync(url, tableName, false);
+                }
+                
+            }
+        }
+    }
+
     static async Task ProcessEndpointAsync(string url, string tableName, bool truncateBeforeInsert)
     {
         using (IDbConnection connection = new SqlConnection(connectionString))
         {
-            Console.WriteLine($"Processando {tableName}...");
-
-            var allData = await FetchAllPagesAsync(url);
-
+            Console.WriteLine($"Processando {tableName} {ano}...");
+            List<JObject> allData = new List<JObject>();
+                    
+            allData = await FetchAllPagesAsync(url);
             if (allData.Count > 0)
             {
                 JArray dataArray = new JArray(allData);
@@ -250,6 +303,12 @@ class Program
                                 break;
                             }
 
+                            if(_url == "desp_dep")
+                            {
+                                item.Add("IdDeputado", idDeputado);
+                                item.Add("IdLegislatura", idLegislatura);
+                            }
+
                             allData.Add(item);
                             Console.Write($"\rProcessando item {allData.Count}");
                         }
@@ -268,13 +327,21 @@ class Program
                         {
                             itemNew.Add("IdProposicao", idProposicao);
                             var statusProposicao = item["statusProposicao"];
-                            itemNew.Add("CodSituacao", item["statusProposicao"]["CodSituacao"]);
+                            itemNew.Add("CodSituacao", item["statusProposicao"]["codSituacao"]);
                             itemNew.Add("despacho", item["statusProposicao"]["despacho"]);
                             allData.Add(itemNew);
                             break;
                         }
+
+
+                        if (_url == "desp_dep")
+                        {
+                            item.Add("IdDeputado", idDeputado);
+                            item.Add("IdLegislatura", idLegislatura);
+                        }
+
                         contador++;
-                        Console.Write($"\rProcessando item {contador}");
+                        Console.Write($"\rProcessando item {contador} - {idLegislatura}");
                         allData.Add(item);
                     }
                 }
