@@ -9,7 +9,8 @@ using System.IO.Pipes;
 
 class Program
 {
-    static string connectionString = "Data Source=10.1.1.3;Initial Catalog=teste;User ID=sa;Password=@npd.2020;TrustServerCertificate=True";
+    //altere a string de conexão conforme sua base de dados
+    static string connectionString = "Data Source=andre-pc\\sqlExpress;Initial Catalog=sisUniselva;Integrated Security=True;Connect Timeout=30;Encrypt=False;Trust Server Certificate=False;Application Intent=ReadWrite;Multi Subnet Failover=False";
     static string idProposicao = string.Empty;
     static string _url = string.Empty;
     static int contador = 0;
@@ -25,28 +26,16 @@ class Program
             Dictionary<string, string> endpoints = new Dictionary<string, string>
             {
                 { "deputados", $"https://dadosabertos.camara.leg.br/api/v2/deputados?dataInicio={ano}-02-01&ordem=ASC&ordenarPor=nome&itens=1000" },
-                { "proposicoes", $"https://dadosabertos.camara.leg.br/api/v2/proposicoes?dataInicio={ano}-01-01&dataFim={(ano != 2024 ? ano + "-12-31" : DateTime.Today.Date)}&ordem=ASC&ordenarPor=id&itens=100" },
-                { "orgaos", "https://dadosabertos.camara.leg.br/api/v2/orgaos" },
-                { "votacoes", $"https://dadosabertos.camara.leg.br/api/v2/votacoes?dataInicio={ano}-01-01&dataFim={(ano != 2024 ? ano + "-12-31" : DateTime.Today.Date)}&ordem=ASC&ordenarPor=id&itens=100" },
                 { "partidos", "https://dadosabertos.camara.leg.br/api/v2/partidos" },
                 { "legislaturas", "https://dadosabertos.camara.leg.br/api/v2/legislaturas" },
-                { "situacao", "https://dadosabertos.camara.leg.br/api/v2/referencias/situacoesProposicao" },
-                { "siglaTipo", "https://dadosabertos.camara.leg.br/api/v2/referencias/proposicoes/siglaTipo" },
-                {"tiposDespesa", "https://dadosabertos.camara.leg.br/api/v2/referencias/deputados/tipoDespesa" }
+                { "tiposDespesa", "https://dadosabertos.camara.leg.br/api/v2/referencias/deputados/tipoDespesa" }
             };
 
             Dictionary<int, string> opcoes = new Dictionary<int, string> 
             {
-                {1, "deputados"},
-                {2, "proposicoes"},
-                {3, "orgaos"},
-                {4, "votacoes"},
+                {1, "deputados"}
                 {5, "partidos"},
                 {6, "legislaturas"},
-                {7, "situacao"},
-                {8, "siglaTipo"},
-                {9, "au_prop"},
-                {10, "sit_prop"},
                 {11, "desp_dep"}
             };
             Console.WriteLine("\nDigite a opção ou URL do endpoint da API para buscar autores das proposições ou 'sair' para encerrar:");
@@ -76,26 +65,12 @@ class Program
                 tableName = Console.ReadLine();
             }         
 
-            if(url.ToLower() == "au_prop")
-            {
-                _url = url;
-                Console.WriteLine("Processando autores das proposições...");
-                CarregaProposicoes();
-                continue;
-            }else
-            if(url.ToLower() == "sit_prop")
-            {
-                _url = url;
-                Console.WriteLine("Processando situação das proposições...");
-                CarregaProposicoes();
-                continue;
-            }
-            else if(url.ToLower() == "desp_dep")
+            if(url.ToLower() == "desp_dep")
             {
                 _url = url;
                 Console.WriteLine("Digite a legislatura");
                 idLegislatura = Console.ReadLine();
-                Console.WriteLine("Processando situação das proposições...");
+                Console.WriteLine("Processando as despesas...");
                 CarregaDeputados();
                 continue;
             }
@@ -128,38 +103,6 @@ class Program
         }
 
         Console.WriteLine("Aplicação encerrada.");
-    }
-
-    static void CarregaProposicoes()
-    {
-        using (IDbConnection connection = new SqlConnection(connectionString))
-        {
-            //Console.WriteLine("Processando autores das proposições...");
-
-            var proposicoes = connection.Query("SELECT * FROM Proposicoes").ToList();
-            foreach (var proposicao in proposicoes)
-            {
-                idProposicao = proposicao.id;
-                string tableName = string.Empty;
-                string url = string.Empty;
-                
-                if (_url == "sit_prop")
-                {
-                    url = $"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{proposicao.id}";
-                    tableName = $"ProposicaoSituacao";
-                    ProcessEndpointAsync(url, tableName, false).Wait();
-                    //Console.WriteLine("Situações das proposições armazenados com sucesso!");
-                }
-
-                if(_url == "au_prop")
-                {
-                    url = $"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{proposicao.id}/autores";
-                    tableName = $"ProposicoesAutores";
-                    ProcessEndpointAsync(url, tableName, false).Wait();
-                    //Console.WriteLine("Autores das proposições armazenados com sucesso!");
-                }
-            }
-        }
     }
 
     static async Task CarregaDeputados()
